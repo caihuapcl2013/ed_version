@@ -41,10 +41,7 @@ cap.release()
 assert len(frames) == NUM_HISTORY_FRAMES, "视频帧不足"
 
 image_frames = np.array(frames)  # [T, H, W, C]
-
-print("==== IMAGE FRAMES ====")
 print("image_frames.shape:", image_frames.shape)
-print("======================\n")
 
 # ============================================================
 # 2. Ego history
@@ -68,14 +65,14 @@ model = AlpamayoR1.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
-tokenizer = model.tokenizer
-processor = helper.get_processor(tokenizer)
+processor = helper.get_processor(model.tokenizer)
 
 # ============================================================
-# 4. 官方 pipeline 生成 messages 和 tokenized_data
+# 4. 官方 pipeline 生成 tokenized_data
 # ============================================================
-# 官方做法：用 processor 创建 message 并 tokenize
-messages = helper.create_message(image_frames)  # 官方方法生成 messages
+# 官方做法：processor 直接处理 image_frames
+# 内部会自动生成与视觉 token 对齐的 input_ids
+messages = helper.create_message(image_frames)  # 官方 message pipeline
 
 inputs = processor.apply_chat_template(
     messages,
@@ -85,7 +82,6 @@ inputs = processor.apply_chat_template(
     return_dict=True,
 )
 
-# 确保 input_ids 与视觉 token 数量对齐
 print("==== TOKENIZED INPUTS ====")
 for k, v in inputs.items():
     if isinstance(v, torch.Tensor):
@@ -132,6 +128,5 @@ if "cot" in extra:
 else:
     print("No CoT returned")
 
-# 提取 XY 平面轨迹
 traj_xy = pred_xyz.cpu().numpy()[0, 0, 0, :, :2]
 print("Predicted XY trajectory:\n", traj_xy)
