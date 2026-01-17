@@ -1,9 +1,16 @@
 import torch
 import numpy as np
 import cv2
+import os
 
 from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
 from alpamayo_r1 import helper
+
+# ============================================================
+# 0. 全局调试配置
+# ============================================================
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # ⭐ 强制同步，定位真实炸点
 
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
@@ -12,9 +19,20 @@ NUM_HISTORY_FRAMES = 4
 FRAME_H, FRAME_W = 128, 128
 VIDEO_PATH = "../../test.MOV"
 
-# ------------------ read frames ------------------
+print("==== ENV ====")
+print("Torch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("Device:", torch.cuda.get_device_name(0))
+print("================\n")
+
+
+# ============================================================
+# 1. 读取视频帧
+# ============================================================
+
 cap = cv2.VideoCapture(VIDEO_PATH)
 frames = []
+
 while len(frames) < NUM_HISTORY_FRAMES:
     ret, f = cap.read()
     if not ret:
@@ -22,38 +40,109 @@ while len(frames) < NUM_HISTORY_FRAMES:
     f = cv2.resize(f, (FRAME_W, FRAME_H))
     f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
     frames.append(f)
+
 cap.release()
-assert len(frames) == NUM_HISTORY_FRAMES
+assert len(frames) == NUM_HISTORY_FRAMES, "视频帧数不足"
 
-image_frames = torch.from_numpy(np.array(frames)).permute(0,3,1,2).float()
+image_frames = torch.from_numpy(np.array(frames)).permute(0, 3, 1, 2).float()
 
-# ------------------ ego history ------------------
+print("==== IMAGE FRAMES ====")
+print("image_frames.shape:", image_frames.shape)
+print("image_frames.dtype:", image_frames.dtype)
+print("======================\n")
+
+
+# ============================================================
+# 2. Ego history
+# ============================================================
+
 ego_history_xyz = torch.zeros(1, 1, NUM_HISTORY_FRAMES, 3)
 ego_history_rot = (
     torch.eye(3)
-    .unsqueeze(0).unsqueeze(0).unsqueeze(0)
+    .unsqueeze(0)
+    .unsqueeze(0)
+    .unsqueeze(0)
     .repeat(1, 1, NUM_HISTORY_FRAMES, 1, 1)
 )
 
-# ------------------ message ------------------
+print("==== EGO HISTORY ====")
+print("ego_history_xyz:", ego_history_xyz.shape)
+print("ego_history_rot:", ego_history_rot.shape)
+print("=====================\n")
+
+
+# ============================================================
+# 3. 构建 message
+# ============================================================
+
 messages = helper.create_message(image_frames)
 
-# ------------------ model ------------------
+print("==== MESSAGE STRUCTURE ====")
+print(messages)
+print("===========================\n")
+
+
+# ============================================================
+# 4. 加载模型
+# ============================================================
+
+print("Loading Alpamayo-R1-10B ...")
+
 model = AlpamayoR1.from_pretrained(
     "nvidia/Alpamayo-R1-10B",
     dtype=DTYPE
 ).to(DEVICE)
+
 model.eval()
 
-processor = helper.get_processor(model.tokenizer)
+tokenizer = model.tokenizer
+processor = helper.get_processor(tokenizer)
 
-# ------------------ CRITICAL FIX ------------------
+print("==== TOKENIZER INFO ====")
+print("pad_token:", tokenizer.pad_token)
+print("pad_token_id:", tokenizer.pad_token_id)
+print("bos_token:", tokenizer.bos_token)
+print("bos_token_id:", tokenizer.bos_token_id)
+print("eos_token:", tokenizer.eos_token)
+print("eos_token_id:", tokenizer.eos_token_id)
+print("=========================\n")
+
+
+# ============================================================
+# 5. 【硬修复】强制 pad_token 合法
+# ============================================================
+
+if tokenizer.pad_token_id is None or tokenizer.pad_token_id < 0:
+    print("[FIX] pad_token_id 非法，强制修复")
+
+    if tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    elif tokenizer.bos_token is not None:
+        tokenizer.pad_token = tokenizer.bos_token
+    else:
+        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+
 vlm = model.vlm
+vlm.config.pad_token_id = tokenizer.pad_token_id
+vlm.generation_config.pad_token_id = tokenizer.pad_token_id
+
+# 明确关掉 BOS / EOS
 vlm.generation_config.bos_token_id = None
 vlm.generation_config.eos_token_id = None
-vlm.generation_config.pad_token_id = model.tokenizer.pad_token_id
 
-# ------------------ tokenize ------------------
+print("==== AFTER PAD FIX ====")
+print("pad_token_id:", tokenizer.pad_token_id)
+print("vlm.config.pad_token_id:", vlm.config.pad_token_id)
+print("vlm.gen.pad_token_id:", vlm.generation_config.pad_token_id)
+print("=======================\n")
+
+
+# ============================================================
+# 6. Tokenize（关键调试点）
+# ============================================================
+
 inputs = processor.apply_chat_template(
     messages,
     tokenize=True,
@@ -62,13 +151,40 @@ inputs = processor.apply_chat_template(
     return_dict=True,
 )
 
+print("==== TOKENIZED INPUTS ====")
+for k, v in inputs.items():
+    print(k, type(v), v.shape if hasattr(v, "shape") else "")
+print("===========================\n")
+
+# ⭐⭐⭐ 关键：删除 attention_mask ⭐⭐⭐
+if "attention_mask" in inputs:
+    print("[FIX] Removing attention_mask to avoid HF generate CUDA path")
+    inputs.pop("attention_mask")
+
+print("Remaining keys:", inputs.keys(), "\n")
+
+
+# ============================================================
+# 7. 组装模型输入
+# ============================================================
+
 model_inputs = {
     "tokenized_data": helper.to_device(inputs, DEVICE),
     "ego_history_xyz": ego_history_xyz.to(DEVICE),
     "ego_history_rot": ego_history_rot.to(DEVICE),
 }
 
-# ------------------ inference ------------------
+print("==== MODEL INPUTS READY ====\n")
+
+
+# ============================================================
+# 8. 推理（真实炸点只可能在这里）
+# ============================================================
+
+torch.cuda.manual_seed_all(42)
+
+print("==== START INFERENCE ====")
+
 with torch.no_grad(), torch.autocast("cuda", dtype=DTYPE):
     pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
         data=model_inputs,
@@ -79,5 +195,20 @@ with torch.no_grad(), torch.autocast("cuda", dtype=DTYPE):
         return_extra=True,
     )
 
-print("Trajectory shape:", pred_xyz.shape)
-print("CoT:", extra["cot"][0])
+print("==== INFERENCE DONE ====\n")
+
+
+# ============================================================
+# 9. 输出结果
+# ============================================================
+
+print("pred_xyz.shape:", pred_xyz.shape)
+print("pred_rot.shape:", pred_rot.shape)
+
+if "cot" in extra:
+    print("CoT:\n", extra["cot"][0])
+else:
+    print("No CoT returned")
+
+traj_xy = pred_xyz.cpu().numpy()[0, 0, 0, :, :2]
+print("Predicted XY trajectory:\n", traj_xy)
