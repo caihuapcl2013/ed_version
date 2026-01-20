@@ -172,7 +172,7 @@ def load_physical_aiavdataset(
         )
 
         # frames: (num_frames, H, W, 3) uint8
-        frames, frame_timestamps = camera.camera.decode_images_from_timestamps(image_timestamps)
+        frames, frame_timestamps = camera.decode_images_from_timestamps(image_timestamps)
 
         # Convert to (num_frames, 3, H, W) for model input
         frames_tensor = torch.from_numpy(frames)
