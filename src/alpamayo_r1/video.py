@@ -26,7 +26,7 @@ from alpamayo_r1 import helper
 
 
 # Example clip ID
-video_path = "030c760c-ae38-49aa-9ad8-f5650a545d26"
+video_path = "../../test.MOV"
 print(f"Loading dataset for clip_id: {video_path}...")
 data = load_physical_aiavdataset_video(video_path, t0_us=5_100_000)
 print("Dataset loaded.")
