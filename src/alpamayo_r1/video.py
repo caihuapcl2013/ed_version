@@ -9,6 +9,12 @@ from alpamayo_r1 import helper
 import os
 
 
+import os
+import cv2
+import torch
+import numpy as np
+from einops import rearrange
+
 def infer_one_clip(model, processor, video_path, t0_us, device="cuda", save_dir="./cot_results"):
     print(f"\n🚀 Inference at t0_us = {t0_us} ({t0_us/1e6:.2f}s)")
 
@@ -18,8 +24,10 @@ def infer_one_clip(model, processor, video_path, t0_us, device="cuda", save_dir=
     # 加载视频片段数据
     data = load_physical_aiavdataset_video(video_path, t0_us=t0_us)
 
+    # flatten 图像帧
     messages = helper.create_message(data["image_frames"].flatten(0, 1))
 
+    # 处理输入
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
@@ -54,30 +62,32 @@ def infer_one_clip(model, processor, video_path, t0_us, device="cuda", save_dir=
     diff = np.linalg.norm(pred_xy - gt_xy[None, ...], axis=1).mean(-1)
     min_ade = diff.min()
 
-    print("🧠 CoT:", extra["cot"][0])
     print("📏 minADE:", min_ade, "meters")
 
-    # ===== 在当前帧画 CoT 并保存 =====
-    # 取第一帧
-    first_frame = data["image_frames"][0, 0].cpu().numpy()  # (H,W,3)
-    # 如果是 [0,255] float，要转成 uint8
+    # ===== 处理 CoT 文本 =====
+    cot_array = extra["cot"]
+    if isinstance(cot_array, np.ndarray):
+        cot_text = "\n".join([str(x) for x in cot_array.flatten()])
+    else:
+        import itertools
+        cot_text = "\n".join([str(x) for x in itertools.chain.from_iterable(cot_array)])
+    print("🧠 CoT:", cot_text.replace('\n', ' | '))
+
+    # ===== 处理图像 =====
+    first_frame = data["image_frames"][0, 0].cpu().numpy()  # (3, H, W)
+    first_frame = np.transpose(first_frame, (1, 2, 0))     # (H, W, 3)
     if first_frame.dtype != np.uint8:
         first_frame = (np.clip(first_frame, 0, 1) * 255).astype(np.uint8)
-    
-    # OpenCV BGR 转换 (假设原是 RGB)
     first_frame_bgr = cv2.cvtColor(first_frame, cv2.COLOR_RGB2BGR)
 
-    # 在图像上写 CoT
-    # cot_text = extra["cot"][0]
-    cot_text = extra["cot"][0, 0] if isinstance(extra["cot"], np.ndarray) else extra["cot"][0][0]
-    cot_text = str(cot_text)
- 
+    # ===== 绘制 CoT 到图像 =====
     y0, dy = 30, 25
     for i, line in enumerate(cot_text.split('\n')):
         y = y0 + i*dy
-        cv2.putText(first_frame_bgr, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+        cv2.putText(first_frame_bgr, line, (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
-    # 保存
+    # ===== 保存图像 =====
     video_name = os.path.basename(video_path).rsplit('.', 1)[0]
     save_path = os.path.join(save_dir, f"{video_name}_{t0_us}.jpg")
     cv2.imwrite(save_path, first_frame_bgr)
