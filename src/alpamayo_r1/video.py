@@ -68,7 +68,8 @@ def infer_one_clip(model, processor, video_path, t0_us, device="cuda", save_dir=
     first_frame_bgr = cv2.cvtColor(first_frame, cv2.COLOR_RGB2BGR)
 
     # 在图像上写 CoT
-    cot_text = extra["cot"][0]
+    # cot_text = extra["cot"][0]
+    cot_text = extra["cot"][0][0] 
     y0, dy = 30, 25
     for i, line in enumerate(cot_text.split('\n')):
         y = y0 + i*dy
