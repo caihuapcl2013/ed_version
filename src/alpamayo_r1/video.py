@@ -6,11 +6,16 @@ import cv2
 from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
 from alpamayo_r1.load_local_video import load_physical_aiavdataset_video
 from alpamayo_r1 import helper
+import os
 
 
-def infer_one_clip(model, processor, video_path, t0_us, device="cuda"):
+def infer_one_clip(model, processor, video_path, t0_us, device="cuda", save_dir="./cot_results"):
     print(f"\n🚀 Inference at t0_us = {t0_us} ({t0_us/1e6:.2f}s)")
 
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 加载视频片段数据
     data = load_physical_aiavdataset_video(video_path, t0_us=t0_us)
 
     messages = helper.create_message(data["image_frames"].flatten(0, 1))
@@ -38,7 +43,7 @@ def infer_one_clip(model, processor, video_path, t0_us, device="cuda"):
             data=model_inputs,
             top_p=0.98,
             temperature=0.6,
-            num_traj_samples=1,     # 显存安全
+            num_traj_samples=1,
             max_generation_length=256,
             return_extra=True,
         )
@@ -52,8 +57,30 @@ def infer_one_clip(model, processor, video_path, t0_us, device="cuda"):
     print("🧠 CoT:", extra["cot"][0])
     print("📏 minADE:", min_ade, "meters")
 
-    return min_ade
+    # ===== 在当前帧画 CoT 并保存 =====
+    # 取第一帧
+    first_frame = data["image_frames"][0, 0].cpu().numpy()  # (H,W,3)
+    # 如果是 [0,255] float，要转成 uint8
+    if first_frame.dtype != np.uint8:
+        first_frame = (np.clip(first_frame, 0, 1) * 255).astype(np.uint8)
+    
+    # OpenCV BGR 转换 (假设原是 RGB)
+    first_frame_bgr = cv2.cvtColor(first_frame, cv2.COLOR_RGB2BGR)
 
+    # 在图像上写 CoT
+    cot_text = extra["cot"][0]
+    y0, dy = 30, 25
+    for i, line in enumerate(cot_text.split('\n')):
+        y = y0 + i*dy
+        cv2.putText(first_frame_bgr, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+
+    # 保存
+    video_name = os.path.basename(video_path).rsplit('.', 1)[0]
+    save_path = os.path.join(save_dir, f"{video_name}_{t0_us}.jpg")
+    cv2.imwrite(save_path, first_frame_bgr)
+    print(f"💾 CoT image saved to {save_path}")
+
+    return min_ade
 
 def get_video_duration(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -107,8 +134,8 @@ def main():
     for t, ade in results:
         print(f"time {t:.2f}s -> minADE {ade:.3f} m")
 
-    avg_ade = np.mean([x[1] for x in results])
-    print("\n📊 AVG minADE:", avg_ade, "meters")
+    # avg_ade = np.mean([x[1] for x in results])
+    # print("\n📊 AVG minADE:", avg_ade, "meters")
 
 
 if __name__ == "__main__":
